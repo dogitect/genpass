@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.0'
+
+    - name: Get version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build for all platforms
+      run: |
+        mkdir -p bin
+
+        # Linux amd64
+        GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${{ steps.get_version.outputs.VERSION }}" -o bin/genpass-linux-amd64 .
+
+        # Linux arm64
+        GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${{ steps.get_version.outputs.VERSION }}" -o bin/genpass-linux-arm64 .
+
+        # macOS amd64
+        GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.version=${{ steps.get_version.outputs.VERSION }}" -o bin/genpass-darwin-amd64 .
+
+        # macOS arm64
+        GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=${{ steps.get_version.outputs.VERSION }}" -o bin/genpass-darwin-arm64 .
+
+    - name: Create checksums
+      run: |
+        cd bin
+        sha256sum * > checksums.txt
+
+    - name: Get previous tag
+      id: get_previous_tag
+      run: |
+        # Get all tags sorted by version, exclude current tag
+        ALL_TAGS=$(git tag --sort=-version:refname)
+        CURRENT_TAG=${{ steps.get_version.outputs.VERSION }}
+        PREVIOUS_TAG=$(echo "$ALL_TAGS" | grep -v "^${CURRENT_TAG}$" | head -1 || echo "")
+        echo "PREVIOUS_TAG=${PREVIOUS_TAG}" >> $GITHUB_OUTPUT
+        echo "Found previous tag: ${PREVIOUS_TAG:-none}"
+
+    - name: Create release notes
+      id: release_notes
+      run: |
+        VERSION=${{ steps.get_version.outputs.VERSION }}
+        PREVIOUS_TAG=${{ steps.get_previous_tag.outputs.PREVIOUS_TAG }}
+
+        echo "## What's Changed" > release_notes.md
+        echo "" >> release_notes.md
+
+        if [ ! -z "$PREVIOUS_TAG" ]; then
+          echo "Generating changes since ${PREVIOUS_TAG}..."
+          # Get commits since previous tag - use GitHub repository owner for consistency
+          COMMITS=$(git log --pretty=format:"* %s by @${{ github.repository_owner }} in %h" ${PREVIOUS_TAG}..HEAD 2>/dev/null)
+          if [ ! -z "$COMMITS" ]; then
+            echo "$COMMITS" >> release_notes.md
+          else
+            echo "No changes found between tags." >> release_notes.md
+          fi
+        else
+          echo "First release - showing all commits..."
+          # If no previous tag, show all commits with GitHub owner
+          COMMITS=$(git log --pretty=format:"* %s by @${{ github.repository_owner }} in %h")
+          if [ ! -z "$COMMITS" ]; then
+            echo "$COMMITS" >> release_notes.md
+          else
+            echo "No commits found." >> release_notes.md
+          fi
+        fi
+
+        echo "" >> release_notes.md
+
+        # Debug: show the generated release notes
+        echo "Generated release notes:"
+        cat release_notes.md
+
+    - name: Create Release with GitHub CLI
+      run: |
+        # Create the release
+        gh release create ${{ steps.get_version.outputs.VERSION }} \
+          --title "${{ steps.get_version.outputs.VERSION }}" \
+          --notes-file release_notes.md \
+          bin/genpass-* \
+          bin/checksums.txt
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
