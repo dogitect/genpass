@@ -11,15 +11,18 @@ go install github.com/dogitect/genpass@latest
 ## Usage
 
 ```bash
+# Default (hyphenated format)
 genpass
-genpass -type compact
-genpass -count 5
-genpass -help
+
+# Compact format
+genpass -t compact -l 32
+
+# Multiple passwords
+genpass -c 5
+
+# Show statistics
+genpass -c 100 --stats
 ```
-
-## Contributing
-
-PRs accepted.
 
 ## License
 
