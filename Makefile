@@ -3,7 +3,7 @@
 APP_NAME := genpass
 BINARY_DIR := bin
 GO_FILES := $(wildcard *.go)
-VERSION := 0.0.1
+VERSION := 0.0.2
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # Default target
