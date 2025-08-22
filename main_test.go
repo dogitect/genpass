@@ -1,267 +1,600 @@
+// Package main_test provides comprehensive benchmarks and tests for the
+// advanced genpass implementation showcasing modern Go testing patterns.
+//
+//go:build go1.25
+// +build go1.25
+
 package main
 
 import (
+	"context"
+	"fmt"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
-// TestGenerateRandomString tests the basic functionality of generateRandomString.
-func TestGenerateRandomString(t *testing.T) {
+// Test suite for advanced generator functionality
+
+func TestGeneratorType(t *testing.T) {
 	tests := []struct {
-		name    string
-		length  int
-		charset string
-		wantErr bool
+		name     string
+		input    string
+		expected GeneratorType
+		wantErr  bool
 	}{
-		{"valid length and charset", 10, alphanumericChars, false},
-		{"zero length", 0, alphanumericChars, true},
-		{"negative length", -1, alphanumericChars, true},
-		{"empty charset", 5, "", true},
-		{"single char charset", 5, "a", false},
-		{"large length", 1000, alphanumericChars, false},
+		{"hyphenated", "hyphenated", GeneratorHyphenated, false},
+		{"hyphenated_short", "h", GeneratorHyphenated, false},
+		{"compact", "compact", GeneratorCompact, false},
+		{"compact_short", "c", GeneratorCompact, false},
+		{"invalid", "invalid", 0, true},
+		{"empty", "", 0, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := generateRandomString(tt.length, tt.charset)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("generateRandomString() expected error, got nil")
-				}
-				return
+			result, err := ParseGeneratorType(tt.input)
+			if tt.wantErr && err == nil {
+				t.Errorf("ParseGeneratorType(%q) expected error, got nil", tt.input)
 			}
-
-			if err != nil {
-				t.Errorf("generateRandomString() unexpected error: %v", err)
-				return
+			if !tt.wantErr && err != nil {
+				t.Errorf("ParseGeneratorType(%q) unexpected error: %v", tt.input, err)
 			}
-
-			if len(result) != tt.length {
-				t.Errorf("generateRandomString() length = %d, want %d", len(result), tt.length)
-			}
-
-			// Check that all characters are from the charset
-			for _, char := range result {
-				if !strings.ContainsRune(tt.charset, char) {
-					t.Errorf("generateRandomString() contains invalid char: %c", char)
-				}
+			if !tt.wantErr && result != tt.expected {
+				t.Errorf("ParseGeneratorType(%q) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
 	}
 }
 
-// TestGenerateHyphenatedString tests hyphenated string generation.
-func TestGenerateHyphenatedString(t *testing.T) {
-	result, err := generateHyphenatedString()
-	if err != nil {
-		t.Fatalf("generateHyphenatedString() unexpected error: %v", err)
+func TestCharacterSet(t *testing.T) {
+	t.Run("basic_functionality", func(t *testing.T) {
+		cs := NewCharacterSet("abc123")
+
+		if cs.Len() != 6 {
+			t.Errorf("CharacterSet.Len() = %d, want 6", cs.Len())
+		}
+
+		// Test character access
+		char := cs.At(0)
+		if !slices.Contains([]byte("abc123"), char) {
+			t.Errorf("CharacterSet.At(0) = %c, not in expected set", char)
+		}
+	})
+
+	t.Run("deduplication", func(t *testing.T) {
+		cs := NewCharacterSet("aabbcc")
+		if cs.Len() != 3 {
+			t.Errorf("CharacterSet with duplicates, Len() = %d, want 3", cs.Len())
+		}
+	})
+
+	t.Run("power_of_2_optimization", func(t *testing.T) {
+		// Test with power-of-2 character set
+		cs := NewCharacterSet("abcd")
+		if cs.mask == 0 {
+			t.Error("Power-of-2 character set should have optimization mask")
+		}
+
+		// Test with non-power-of-2 character set
+		cs2 := NewCharacterSet("abcde")
+		if cs2.mask != 0 {
+			t.Error("Non-power-of-2 character set should not have optimization mask")
+		}
+	})
+}
+
+func TestGeneratorConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *GeneratorConfig
+		wantErr bool
+	}{
+		{
+			name: "valid_config",
+			config: &GeneratorConfig{
+				Type:    GeneratorCompact,
+				Length:  16,
+				Count:   1,
+				Charset: NewCharacterSet(alphanumericChars),
+				Workers: 1,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid_length",
+			config: &GeneratorConfig{
+				Type:    GeneratorCompact,
+				Length:  0,
+				Count:   1,
+				Charset: NewCharacterSet(alphanumericChars),
+				Workers: 1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid_count",
+			config: &GeneratorConfig{
+				Type:    GeneratorCompact,
+				Length:  16,
+				Count:   0,
+				Charset: NewCharacterSet(alphanumericChars),
+				Workers: 1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty_charset",
+			config: &GeneratorConfig{
+				Type:    GeneratorCompact,
+				Length:  16,
+				Count:   1,
+				Charset: NewCharacterSet(""),
+				Workers: 1,
+			},
+			wantErr: true,
+		},
 	}
 
-	// Should have format: xxxxxx-xxxxxx-xxxxxx (6-6-6 with hyphens)
-	if len(result) != 20 { // 6+1+6+1+6 = 20
-		t.Errorf("generateHyphenatedString() length = %d, want 20", len(result))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if tt.wantErr && err == nil {
+				t.Errorf("GeneratorConfig.Validate() expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("GeneratorConfig.Validate() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestBufferPool(t *testing.T) {
+	pool := NewBufferPool(1024)
+
+	// Test buffer allocation and return
+	buf1 := pool.Get()
+	if buf1 == nil {
+		t.Fatal("BufferPool.Get() returned nil")
+	}
+
+	buf1.Write([]byte("test"))
+	if buf1.String() != "test" {
+		t.Errorf("Buffer content = %q, want %q", buf1.String(), "test")
+	}
+
+	pool.Put(buf1)
+
+	// Get another buffer - should be the same one, reset
+	buf2 := pool.Get()
+	if buf2.String() != "" {
+		t.Errorf("Reused buffer should be empty, got %q", buf2.String())
+	}
+
+	pool.Put(buf2)
+}
+
+func TestEntropySource(t *testing.T) {
+	es := NewEntropySource()
+
+	t.Run("generate_bytes", func(t *testing.T) {
+		bytes, err := es.GenerateBytes(32)
+		if err != nil {
+			t.Fatalf("EntropySource.GenerateBytes() error: %v", err)
+		}
+
+		if len(bytes) != 32 {
+			t.Errorf("Generated bytes length = %d, want 32", len(bytes))
+		}
+
+		// Check that bytes are not all zeros (extremely unlikely)
+		allZeros := true
+		for _, b := range bytes {
+			if b != 0 {
+				allZeros = false
+				break
+			}
+		}
+		if allZeros {
+			t.Error("Generated bytes are all zeros - extremely unlikely")
+		}
+	})
+
+	t.Run("generate_uint64", func(t *testing.T) {
+		val, err := es.GenerateUint64()
+		if err != nil {
+			t.Fatalf("EntropySource.GenerateUint64() error: %v", err)
+		}
+
+		// Just ensure we got a value - randomness testing is complex
+		_ = val
+	})
+
+	t.Run("health_check", func(t *testing.T) {
+		if !es.Health() {
+			t.Error("EntropySource should be healthy")
+		}
+	})
+
+	t.Run("stats", func(t *testing.T) {
+		generated, errors := es.Stats()
+		if generated == 0 {
+			t.Error("Stats should show generated bytes > 0")
+		}
+		if errors > generated {
+			t.Error("Errors should not exceed generated count")
+		}
+	})
+}
+
+func TestCryptoGenerator(t *testing.T) {
+	gen := NewCryptoGenerator(4)
+	ctx := context.Background()
+
+	config := &GeneratorConfig{
+		Type:         GeneratorCompact,
+		Length:       16,
+		Count:        1,
+		Charset:      NewCharacterSet(alphanumericChars),
+		Parallel:     false,
+		Workers:      1,
+		ConstantTime: true,
+	}
+
+	t.Run("single_generation", func(t *testing.T) {
+		result, err := gen.Generate(ctx, config)
+		if err != nil {
+			t.Fatalf("CryptoGenerator.Generate() error: %v", err)
+		}
+
+		if len(result) != config.Length {
+			t.Errorf("Generated string length = %d, want %d", len(result), config.Length)
+		}
+
+		// Verify all characters are from charset
+		for _, char := range result {
+			charset := config.Charset
+			valid := false
+			for i := 0; i < charset.Len(); i++ {
+				if byte(char) == charset.chars[i] {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				t.Errorf("Generated string contains invalid char: %c", char)
+			}
+		}
+	})
+
+	t.Run("batch_generation", func(t *testing.T) {
+		config.Count = 5
+		results, err := gen.GenerateBatch(ctx, config)
+		if err != nil {
+			t.Fatalf("CryptoGenerator.GenerateBatch() error: %v", err)
+		}
+
+		if len(results) != config.Count {
+			t.Errorf("Generated batch size = %d, want %d", len(results), config.Count)
+		}
+
+		// Verify uniqueness (highly probable for crypto random)
+		unique := make(map[string]bool)
+		for _, result := range results {
+			if unique[result] {
+				t.Errorf("Duplicate string in batch: %s", result)
+			}
+			unique[result] = true
+		}
+	})
+
+	t.Run("parallel_generation", func(t *testing.T) {
+		config.Count = 10
+		config.Parallel = true
+		config.Workers = 4
+
+		results, err := gen.GenerateBatch(ctx, config)
+		if err != nil {
+			t.Fatalf("Parallel generation error: %v", err)
+		}
+
+		if len(results) != config.Count {
+			t.Errorf("Parallel batch size = %d, want %d", len(results), config.Count)
+		}
+	})
+
+	t.Run("stream_generation", func(t *testing.T) {
+		config.Count = 3
+		results := make([]string, 0, config.Count)
+
+		for result, err := range gen.GenerateStream(ctx, config) {
+			if err != nil {
+				t.Fatalf("Stream generation error: %v", err)
+			}
+			results = append(results, result)
+		}
+
+		if len(results) != config.Count {
+			t.Errorf("Stream results count = %d, want %d", len(results), config.Count)
+		}
+	})
+
+	t.Run("context_cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := gen.Generate(ctx, config)
+		if err == nil || err != context.Canceled {
+			t.Errorf("Expected context.Canceled, got: %v", err)
+		}
+	})
+}
+
+func TestHyphenatedGeneration(t *testing.T) {
+	gen := NewCryptoGenerator(4)
+	ctx := context.Background()
+
+	config := &GeneratorConfig{
+		Type:    GeneratorHyphenated,
+		Length:  18, // Set a valid length
+		Count:   1,
+		Charset: NewCharacterSet(alphanumericChars),
+		Workers: 1,
+	}
+
+	result, err := gen.Generate(ctx, config)
+	if err != nil {
+		t.Fatalf("Hyphenated generation error: %v", err)
 	}
 
 	parts := strings.Split(result, "-")
 	if len(parts) != 3 {
-		t.Errorf("generateHyphenatedString() parts count = %d, want 3", len(parts))
+		t.Errorf("Hyphenated string parts = %d, want 3", len(parts))
 	}
 
 	for i, part := range parts {
 		if len(part) != 6 {
-			t.Errorf("generateHyphenatedString() part %d length = %d, want 6", i, len(part))
-		}
-
-		// Check all characters are alphanumeric
-		for _, char := range part {
-			if !strings.ContainsRune(alphanumericChars, char) {
-				t.Errorf("generateHyphenatedString() part %d contains invalid char: %c", i, char)
-			}
+			t.Errorf("Part %d length = %d, want 6", i, len(part))
 		}
 	}
 }
 
-// TestGenerateCompactString tests compact string generation.
-func TestGenerateCompactString(t *testing.T) {
-	tests := []struct {
-		name   string
-		length int
-		want   int
-	}{
-		{"default length", 15, 15},
-		{"custom length", 32, 32},
-		{"zero length uses default", 0, defaultLength},
-		{"negative length uses default", -5, defaultLength},
-	}
+// Benchmark suite using modern Go benchmarking patterns
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := generateCompactString(tt.length)
-			if err != nil {
-				t.Fatalf("generateCompactString() unexpected error: %v", err)
-			}
+func BenchmarkCharacterSet(b *testing.B) {
+	cs := NewCharacterSet(alphanumericChars)
 
-			if len(result) != tt.want {
-				t.Errorf("generateCompactString() length = %d, want %d", len(result), tt.want)
-			}
+	b.Run("at_power_of_2", func(b *testing.B) {
+		cs := NewCharacterSet("abcdefghijklmnop") // 16 chars = 2^4
+		b.ResetTimer()
 
-			// Check all characters are alphanumeric
-			for _, char := range result {
-				if !strings.ContainsRune(alphanumericChars, char) {
-					t.Errorf("generateCompactString() contains invalid char: %c", char)
-				}
-			}
-		})
-	}
+		for i := 0; i < b.N; i++ {
+			cs.At(uint64(i))
+		}
+	})
+
+	b.Run("at_non_power_of_2", func(b *testing.B) {
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			cs.At(uint64(i))
+		}
+	})
 }
 
-// TestGenerateString tests the main generation function.
-func TestGenerateString(t *testing.T) {
-	tests := []struct {
-		name       string
-		outputType string
-		length     int
-		wantErr    bool
-		checkLen   func(string) bool
-	}{
-		{
-			name:       "hyphenated",
-			outputType: TypeHyphenated,
-			length:     15,
-			wantErr:    false,
-			checkLen:   func(s string) bool { return len(s) == 20 }, // 6-6-6 format
-		},
-		{
-			name:       "compact",
-			outputType: TypeCompact,
-			length:     15,
-			wantErr:    false,
-			checkLen:   func(s string) bool { return len(s) == 15 },
-		},
-		{
-			name:       "invalid type",
-			outputType: "invalid",
-			length:     15,
-			wantErr:    true,
-			checkLen:   nil,
-		},
-	}
+func BenchmarkBufferPool(b *testing.B) {
+	pool := NewBufferPool(1024)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := generateString(tt.outputType, tt.length)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("generateString() expected error, got nil")
-				}
-				return
-			}
-
-			if err != nil {
-				t.Errorf("generateString() unexpected error: %v", err)
-				return
-			}
-
-			if tt.checkLen != nil && !tt.checkLen(result) {
-				t.Errorf("generateString() length check failed for result: %s", result)
-			}
-		})
-	}
+	b.Run("get_put", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			buf := pool.Get()
+			buf.Write([]byte("test"))
+			pool.Put(buf)
+		}
+	})
 }
 
-// TestRandomness tests that generated strings are different.
-func TestRandomness(t *testing.T) {
-	const iterations = 100
-	results := make(map[string]bool)
+func BenchmarkEntropySource(b *testing.B) {
+	es := NewEntropySource()
 
-	for i := 0; i < iterations; i++ {
-		result, err := generateCompactString(20)
-		if err != nil {
-			t.Fatalf("generateCompactString() unexpected error: %v", err)
-		}
-
-		if results[result] {
-			t.Errorf("generateCompactString() produced duplicate: %s", result)
-		}
-		results[result] = true
-	}
-
-	if len(results) != iterations {
-		t.Errorf("Expected %d unique results, got %d", iterations, len(results))
-	}
-}
-
-// TestCharacterDistribution tests that characters are well distributed.
-func TestCharacterDistribution(t *testing.T) {
-	const iterations = 1000
-	const length = 100
-	charCount := make(map[rune]int)
-
-	for i := 0; i < iterations; i++ {
-		result, err := generateCompactString(length)
-		if err != nil {
-			t.Fatalf("generateCompactString() unexpected error: %v", err)
-		}
-
-		for _, char := range result {
-			charCount[char]++
-		}
-	}
-
-	// Check that we have reasonable distribution
-	// With 62 possible characters (a-z, A-Z, 0-9) and 100,000 total chars,
-	// each character should appear roughly 1,613 times on average
-	expectedAvg := float64(iterations*length) / float64(len(alphanumericChars))
-	tolerance := expectedAvg * 0.3 // Allow 30% deviation
-
-	for _, char := range alphanumericChars {
-		count := charCount[rune(char)]
-		if float64(count) < expectedAvg-tolerance || float64(count) > expectedAvg+tolerance {
-			t.Logf("Character %c appeared %d times (expected ~%.0f)", char, count, expectedAvg)
-		}
-	}
-}
-
-// BenchmarkGenerateRandomString benchmarks the core random string generation.
-func BenchmarkGenerateRandomString(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_, err := generateRandomString(15, alphanumericChars)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkGenerateHyphenatedString benchmarks hyphenated string generation.
-func BenchmarkGenerateHyphenatedString(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_, err := generateHyphenatedString()
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkGenerateCompactString benchmarks compact string generation.
-func BenchmarkGenerateCompactString(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		_, err := generateCompactString(15)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkParallel tests performance under concurrent load.
-func BenchmarkGenerateRandomStringParallel(b *testing.B) {
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_, err := generateRandomString(15, alphanumericChars)
+	b.Run("generate_bytes_32", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_, err := es.GenerateBytes(32)
 			if err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
+
+	b.Run("generate_uint64", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_, err := es.GenerateUint64()
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkCryptoGenerator(b *testing.B) {
+	gen := NewCryptoGenerator(runtime.NumCPU())
+	ctx := context.Background()
+
+	configs := map[string]*GeneratorConfig{
+		"compact_16": {
+			Type:    GeneratorCompact,
+			Length:  16,
+			Count:   1,
+			Charset: NewCharacterSet(alphanumericChars),
+			Workers: 1,
+		},
+		"compact_64": {
+			Type:    GeneratorCompact,
+			Length:  64,
+			Count:   1,
+			Charset: NewCharacterSet(alphanumericChars),
+			Workers: 1,
+		},
+		"hyphenated": {
+			Type:    GeneratorHyphenated,
+			Length:  18, // Valid length
+			Count:   1,
+			Charset: NewCharacterSet(alphanumericChars),
+			Workers: 1,
+		},
+	}
+
+	for name, config := range configs {
+		b.Run("single_"+name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_, err := gen.Generate(ctx, config)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+
+	b.Run("parallel_batch", func(b *testing.B) {
+		config := &GeneratorConfig{
+			Type:     GeneratorCompact,
+			Length:   32,
+			Count:    100,
+			Charset:  NewCharacterSet(alphanumericChars),
+			Parallel: true,
+			Workers:  runtime.NumCPU(),
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, err := gen.GenerateBatch(ctx, config)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// Concurrent stress test
+func TestConcurrentStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping stress test in short mode")
+	}
+
+	gen := NewCryptoGenerator(runtime.NumCPU() * 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	config := &GeneratorConfig{
+		Type:     GeneratorCompact,
+		Length:   32,
+		Count:    1,
+		Charset:  NewCharacterSet(alphanumericChars),
+		Parallel: true,
+		Workers:  runtime.NumCPU(),
+	}
+
+	const numGoroutines = 50
+	const generationsPerGoroutine = 100
+
+	var wg sync.WaitGroup
+	results := sync.Map{}
+	errors := make(chan error, numGoroutines*generationsPerGoroutine)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			for j := 0; j < generationsPerGoroutine; j++ {
+				result, err := gen.Generate(ctx, config)
+				if err != nil {
+					errors <- fmt.Errorf("goroutine %d, iteration %d: %w", id, j, err)
+					return
+				}
+
+				// Check for duplicates (should be extremely rare)
+				if _, exists := results.LoadOrStore(result, true); exists {
+					errors <- fmt.Errorf("duplicate generated: %s", result)
+					return
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	// Check for errors
+	for err := range errors {
+		t.Error(err)
+	}
+
+	// Count unique results
+	count := 0
+	results.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+
+	expected := numGoroutines * generationsPerGoroutine
+	if count != expected {
+		t.Errorf("Generated %d unique strings, expected %d", count, expected)
+	}
+
+	// Print stats
+	generated, genErrors, avgDuration := gen.Stats()
+	t.Logf("Stress test stats: %d generated, %d errors, avg duration: %v",
+		generated, genErrors, avgDuration)
+}
+
+// Example usage tests showing the new API
+func ExampleCryptoGenerator_Generate() {
+	gen := NewCryptoGenerator(4)
+	ctx := context.Background()
+
+	config := &GeneratorConfig{
+		Type:    GeneratorCompact,
+		Length:  16,
+		Count:   1,
+		Charset: NewCharacterSet(alphanumericChars),
+		Workers: 1,
+	}
+
+	result, err := gen.Generate(ctx, config)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Generated: %s\n", result)
+	fmt.Printf("Length: %d\n", len(result))
+	// Output will vary due to randomness, but format is:
+	// Generated: [16 character alphanumeric string]
+	// Length: 16
+}
+
+func ExampleCryptoGenerator_GenerateStream() {
+	gen := NewCryptoGenerator(4)
+	ctx := context.Background()
+
+	config := &GeneratorConfig{
+		Type:    GeneratorHyphenated,
+		Count:   3,
+		Charset: NewCharacterSet(alphanumericChars),
+		Workers: 1,
+	}
+
+	for result, err := range gen.GenerateStream(ctx, config) {
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("Generated: %s\n", result)
+	}
+	// Output will vary due to randomness, but format is:
+	// Generated: [6chars]-[6chars]-[6chars]
+	// Generated: [6chars]-[6chars]-[6chars]
+	// Generated: [6chars]-[6chars]-[6chars]
 }
